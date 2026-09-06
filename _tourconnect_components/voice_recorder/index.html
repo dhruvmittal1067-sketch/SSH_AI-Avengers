@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 8px;
+    font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, sans-serif;
+    background: transparent;
+  }
+  #wrap { max-width: 420px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button {
+    border: 1px solid #d0d0d0;
+    background: #ffffff;
+    color: #262730;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: #21c45d; color: white; border-color: #21c45d; }
+  button.danger { background: #ff4b4b; color: white; border-color: #ff4b4b; }
+  #status { margin-top: 6px; font-size: 13px; color: #555; min-height: 18px; }
+  #timer { font-weight: 600; color: #ff4b4b; }
+  #mic-icon { font-size: 20px; }
+  audio { width: 100%; margin-top: 6px; display: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div class="row">
+    <span id="mic-icon">🎙️</span>
+    <button id="btnStart">Start Speaking</button>
+    <button id="btnStop" disabled>⏹ Stop</button>
+    <button id="btnUse" class="primary" style="display:none;">✅ Use this</button>
+    <button id="btnRetake" class="danger" style="display:none;">🔁 Retry</button>
+  </div>
+  <audio id="playback" controls></audio>
+  <div id="status">Tap "Start Speaking" and allow microphone access.</div>
+</div>
+
+<script>
+  function sendMessageToStreamlitClient(type, data) {
+    var outData = Object.assign({ isStreamlitMessage: true, type: type }, data);
+    window.parent.postMessage(outData, "*");
+  }
+  function notifyRender() {
+    sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+  }
+  function setFrameHeight() {
+    var h = document.getElementById("wrap").scrollHeight + 24;
+    sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: h });
+  }
+  function sendValue(value) {
+    sendMessageToStreamlitClient("streamlit:setComponentValue", { value: value, dataType: "json" });
+  }
+
+  const MAX_SECONDS = 20; // speech clips should be short — keeps STT fast & cheap
+
+  const btnStart = document.getElementById("btnStart");
+  const btnStop = document.getElementById("btnStop");
+  const btnUse = document.getElementById("btnUse");
+  const btnRetake = document.getElementById("btnRetake");
+  const statusEl = document.getElementById("status");
+  const playback = document.getElementById("playback");
+
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let chunks = [];
+  let recordedBlob = null;
+  let timerInterval = null;
+  let secondsElapsed = 0;
+
+  function pickMimeType() {
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+    for (const c of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c;
+    }
+    return "";
+  }
+
+  async function startRecording() {
+    statusEl.textContent = "Requesting microphone access...";
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      statusEl.textContent = "⚠️ Could not access microphone: " + err.message;
+      return;
+    }
+
+    chunks = [];
+    recordedBlob = null;
+    const mimeType = pickMimeType();
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+    } catch (e) {
+      statusEl.textContent = "⚠️ Recording isn't supported in this browser.";
+      return;
+    }
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.onstop = onRecordingStopped;
+    mediaRecorder.start();
+
+    secondsElapsed = 0;
+    timerInterval = setInterval(() => {
+      secondsElapsed += 1;
+      statusEl.innerHTML = "🔴 Listening... <span id='timer'>" + secondsElapsed + "s</span> (auto-stops at " + MAX_SECONDS + "s)";
+      if (secondsElapsed >= MAX_SECONDS) stopRecording();
+    }, 1000);
+
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+    setFrameHeight();
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    clearInterval(timerInterval);
+    btnStop.disabled = true;
+  }
+
+  function onRecordingStopped() {
+    const mimeType = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
+    recordedBlob = new Blob(chunks, { type: mimeType });
+
+    playback.style.display = "block";
+    playback.src = URL.createObjectURL(recordedBlob);
+
+    btnStart.style.display = "none";
+    btnStop.style.display = "none";
+    btnUse.style.display = "inline-block";
+    btnRetake.style.display = "inline-block";
+    statusEl.textContent = "Got it (" + secondsElapsed + "s). Listen back, then use it or retry.";
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop());
+      mediaStream = null;
+    }
+    setFrameHeight();
+  }
+
+  function useRecording() {
+    if (!recordedBlob) return;
+    statusEl.textContent = "Sending...";
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      sendValue(reader.result);
+      statusEl.textContent = "✅ Sent — processing in the app below.";
+      btnUse.disabled = true;
+    };
+    reader.readAsDataURL(recordedBlob);
+  }
+
+  function retake() {
+    recordedBlob = null;
+    playback.style.display = "none";
+    playback.removeAttribute("src");
+    btnStart.style.display = "inline-block";
+    btnStop.style.display = "inline-block";
+    btnUse.style.display = "none";
+    btnUse.disabled = false;
+    btnRetake.style.display = "none";
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    statusEl.textContent = 'Tap "Start Speaking" and allow microphone access.';
+    sendValue(null);
+    setFrameHeight();
+  }
+
+  btnStart.addEventListener("click", startRecording);
+  btnStop.addEventListener("click", stopRecording);
+  btnUse.addEventListener("click", useRecording);
+  btnRetake.addEventListener("click", retake);
+
+  window.addEventListener("load", () => {
+    notifyRender();
+    setFrameHeight();
+  });
+</script>
+</body>
+</html>

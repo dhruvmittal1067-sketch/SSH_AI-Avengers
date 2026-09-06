@@ -1723,7 +1723,6 @@ if "tourist" not in st.session_state:
 if "last_eco_submission" not in st.session_state:
     st.session_state["last_eco_submission"] = None
 
-<<<<<<< Updated upstream
 
 def _render_ai_outcome(ai_result, submission_id, tourist):
     """
@@ -1863,11 +1862,9 @@ def _render_business_expander(b):
 
 
 # ---------------------------------------------------------
-=======
 if "tourist_user" not in st.session_state:
     st.session_state["tourist_user"] = None
 
->>>>>>> Stashed changes
 # Top Navigation
 # ---------------------------------------------------------
 nav = st.sidebar.radio(

@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 8px;
+    font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, sans-serif;
+    background: transparent;
+  }
+  #wrap { max-width: 480px; }
+  video {
+    width: 100%;
+    max-height: 320px;
+    background: #000;
+    border-radius: 8px;
+    display: block;
+  }
+  .row { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    border: 1px solid #d0d0d0;
+    background: #ffffff;
+    color: #262730;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: #21c45d; color: white; border-color: #21c45d; }
+  button.danger { background: #ff4b4b; color: white; border-color: #ff4b4b; }
+  #status { margin-top: 6px; font-size: 13px; color: #555; min-height: 18px; }
+  #timer { font-weight: 600; color: #ff4b4b; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="live" autoplay muted playsinline></video>
+  <video id="playback" controls playsinline style="display:none;"></video>
+
+  <div class="row">
+    <button id="btnStart">🔴 Start Recording</button>
+    <button id="btnStop" disabled>⏹ Stop</button>
+    <button id="btnUse" class="primary" style="display:none;">✅ Use this recording</button>
+    <button id="btnRetake" class="danger" style="display:none;">🔁 Retake</button>
+  </div>
+  <div id="status">Click "Start Recording" and allow camera access.</div>
+</div>
+
+<script>
+  // ---- Minimal Streamlit component <-> parent messaging (no external JS needed) ----
+  function sendMessageToStreamlitClient(type, data) {
+    var outData = Object.assign({ isStreamlitMessage: true, type: type }, data);
+    window.parent.postMessage(outData, "*");
+  }
+  function notifyRender() {
+    sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+  }
+  function setFrameHeight() {
+    var h = document.getElementById("wrap").scrollHeight + 24;
+    sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: h });
+  }
+  function sendValue(value) {
+    sendMessageToStreamlitClient("streamlit:setComponentValue", { value: value, dataType: "json" });
+  }
+
+  const MAX_SECONDS = 60; // auto-stop safety cap so uploads stay a reasonable size
+
+  const liveVideo = document.getElementById("live");
+  const playbackVideo = document.getElementById("playback");
+  const btnStart = document.getElementById("btnStart");
+  const btnStop = document.getElementById("btnStop");
+  const btnUse = document.getElementById("btnUse");
+  const btnRetake = document.getElementById("btnRetake");
+  const statusEl = document.getElementById("status");
+
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let chunks = [];
+  let recordedBlob = null;
+  let timerInterval = null;
+  let secondsElapsed = 0;
+
+  function pickMimeType() {
+    const candidates = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm",
+      "video/mp4",
+    ];
+    for (const c of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) {
+        return c;
+      }
+    }
+    return "";
+  }
+
+  async function startCamera() {
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      liveVideo.srcObject = mediaStream;
+    } catch (err) {
+      statusEl.textContent = "⚠️ Could not access camera/mic: " + err.message;
+      throw err;
+    }
+  }
+
+  async function startRecording() {
+    statusEl.textContent = "Requesting camera access...";
+    try {
+      if (!mediaStream) await startCamera();
+    } catch (e) {
+      return;
+    }
+    chunks = [];
+    recordedBlob = null;
+    const mimeType = pickMimeType();
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+    } catch (e) {
+      statusEl.textContent = "⚠️ Recording isn't supported in this browser.";
+      return;
+    }
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.onstop = onRecordingStopped;
+    mediaRecorder.start();
+
+    secondsElapsed = 0;
+    timerInterval = setInterval(() => {
+      secondsElapsed += 1;
+      statusEl.innerHTML = "Recording... <span id='timer'>" + secondsElapsed + "s</span> (auto-stops at " + MAX_SECONDS + "s)";
+      if (secondsElapsed >= MAX_SECONDS) stopRecording();
+    }, 1000);
+
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+    setFrameHeight();
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+    }
+    clearInterval(timerInterval);
+    btnStop.disabled = true;
+  }
+
+  function onRecordingStopped() {
+    const mimeType = (mediaRecorder && mediaRecorder.mimeType) || "video/webm";
+    recordedBlob = new Blob(chunks, { type: mimeType });
+
+    liveVideo.style.display = "none";
+    playbackVideo.style.display = "block";
+    playbackVideo.src = URL.createObjectURL(recordedBlob);
+
+    btnStart.style.display = "none";
+    btnStop.style.display = "none";
+    btnUse.style.display = "inline-block";
+    btnRetake.style.display = "inline-block";
+    statusEl.textContent = "Recording finished (" + secondsElapsed + "s). Review it, then use it or retake.";
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop());
+      mediaStream = null;
+    }
+    setFrameHeight();
+  }
+
+  function useRecording() {
+    if (!recordedBlob) return;
+    statusEl.textContent = "Preparing video for upload...";
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      sendValue(reader.result); // data:video/webm;base64,....
+      statusEl.textContent = "✅ Video ready — go back to Streamlit and click 'Submit for AI Review'.";
+      btnUse.disabled = true;
+    };
+    reader.readAsDataURL(recordedBlob);
+  }
+
+  function retake() {
+    recordedBlob = null;
+    playbackVideo.style.display = "none";
+    playbackVideo.removeAttribute("src");
+    liveVideo.style.display = "block";
+    btnStart.style.display = "inline-block";
+    btnStop.style.display = "inline-block";
+    btnUse.style.display = "none";
+    btnUse.disabled = false;
+    btnRetake.style.display = "none";
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    statusEl.textContent = 'Click "Start Recording" and allow camera access.';
+    sendValue(null);
+    startCamera().catch(() => {});
+    setFrameHeight();
+  }
+
+  btnStart.addEventListener("click", startRecording);
+  btnStop.addEventListener("click", stopRecording);
+  btnUse.addEventListener("click", useRecording);
+  btnRetake.addEventListener("click", retake);
+
+  window.addEventListener("load", () => {
+    notifyRender();
+    setFrameHeight();
+    startCamera().catch(() => {});
+  });
+</script>
+</body>
+</html>
